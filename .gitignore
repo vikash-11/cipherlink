@@ -1,0 +1,15 @@
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.local
+
+# Python / signaling-server
+signaling-server/__pycache__/
+signaling-server/*.pyc
+signaling-server/venv/
+signaling-server/.env
+
+# General
+.DS_Store
+*.log
