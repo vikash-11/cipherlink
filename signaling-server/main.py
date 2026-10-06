@@ -1,23 +1,3 @@
-"""
-CipherLink Signaling Server
-FastAPI + WebSocket peer-rendezvous server.
-
-All state is in-memory only — nothing is written to disk or any database.
-online_users is a plain dict; it is wiped on every server restart.
-
-Message protocol (JSON over WebSocket):
-  Client → Server:
-    { "type": "register", "id": "<12-char Crockford ID>" }
-    { "type": "connect_request", "from": "<id>", "to": "<id>" }
-    { "type": "connect_response", "to": "<id>", "accepted": bool }
-    { "type": "handshake_confirm", "to": "<id>", "confirmSignatureBase64": "<base64>" }
-    { "type": "sdp_offer"|"sdp_answer"|"ice_candidate", "to": "<id>", "payload": {...} }
-
-  Server → Client:
-    Forwarded versions of the above (relay-only, server never modifies payloads)
-    { "type": "error", "message": "..." }
-"""
-
 import asyncio
 import json
 import logging
@@ -29,20 +9,34 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.websockets import WebSocketState
 
+
 # ---------------------------------------------------------------------------
 # Logging — console only, never persisted
 # ---------------------------------------------------------------------------
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s"
+)
+
 logger = logging.getLogger("cipherlink-signaling")
+
 
 # ---------------------------------------------------------------------------
 # Application
 # ---------------------------------------------------------------------------
-app = FastAPI(title="CipherLink Signaling Server", docs_url=None, redoc_url=None)
 
-# CORS — allow all origins for WebSocket upgrades.
-# Restrict to your frontend's deployed origin in production by replacing ["*"]
-# with e.g. ["https://your-frontend.vercel.app"].
+app = FastAPI(
+    title="CipherLink Signaling Server",
+    docs_url=None,
+    redoc_url=None
+)
+
+
+# ---------------------------------------------------------------------------
+# CORS
+# ---------------------------------------------------------------------------
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -51,53 +45,103 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # ---------------------------------------------------------------------------
-# In-memory state — plain dicts, never serialised to disk
+# In-memory state
 # ---------------------------------------------------------------------------
+
 # { peer_id: WebSocket }
 online_users: Dict[str, WebSocket] = {}
 
-# Rate-limiting state — { ip: [timestamp, ...] }
-# Tracks connect_request events per source IP (not per ID — IP is the right surface).
+
+# ---------------------------------------------------------------------------
+# Peer ID normalization
+# ---------------------------------------------------------------------------
+
+def normalize_peer_id(peer_id: str) -> str:
+    """
+    Normalize CipherLink Crockford-style peer IDs.
+
+    Examples:
+        103T-HJTH-0481 -> 103THJTH0481
+        103th-jth-0481 -> 103THJTH0481
+    """
+
+    return (
+        peer_id.upper()
+        .replace("-", "")
+        .replace("I", "1")
+        .replace("L", "1")
+        .replace("O", "0")
+        .strip()
+    )
+
+
+# ---------------------------------------------------------------------------
+# Rate limiting
+# ---------------------------------------------------------------------------
+
+# { ip: [timestamp, ...] }
 connect_request_log: Dict[str, list] = defaultdict(list)
 
 RATE_LIMIT_WINDOW_SEC = 60
-RATE_LIMIT_MAX_REQUESTS = 10  # max connect_requests per IP per window
+RATE_LIMIT_MAX_REQUESTS = 10
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def is_rate_limited(ip: str) -> bool:
-    """Return True if this IP has exceeded the connect_request rate limit."""
+    """Return True if this IP exceeded the connect_request rate limit."""
+
     now = time.monotonic()
     window_start = now - RATE_LIMIT_WINDOW_SEC
-    # Prune old timestamps
-    connect_request_log[ip] = [t for t in connect_request_log[ip] if t > window_start]
+
+    # Remove old timestamps
+    connect_request_log[ip] = [
+        t for t in connect_request_log[ip]
+        if t > window_start
+    ]
+
     if len(connect_request_log[ip]) >= RATE_LIMIT_MAX_REQUESTS:
         return True
+
     connect_request_log[ip].append(now)
+
     return False
 
 
+# ---------------------------------------------------------------------------
+# Safe WebSocket send
+# ---------------------------------------------------------------------------
+
 async def safe_send(ws: WebSocket, payload: dict) -> bool:
-    """Send JSON to a WebSocket, returning False if the connection is closed."""
+    """
+    Send JSON to a WebSocket.
+
+    Returns:
+        True  -> message sent successfully
+        False -> connection is closed or sending failed
+    """
+
     try:
         if ws.client_state == WebSocketState.CONNECTED:
             await ws.send_text(json.dumps(payload))
             return True
+
     except Exception:
         pass
+
     return False
 
 
 # ---------------------------------------------------------------------------
-# Health check (HTTP GET)
+# Health check
 # ---------------------------------------------------------------------------
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "online_count": len(online_users)}
+    return {
+        "status": "ok",
+        "online_count": len(online_users)
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -106,116 +150,392 @@ async def health():
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+
     await websocket.accept()
 
-    # Extract connecting IP for rate limiting
-    client_ip = websocket.client.host if websocket.client else "unknown"
+    # Extract client IP
+    client_ip = (
+        websocket.client.host
+        if websocket.client
+        else "unknown"
+    )
+
     peer_id = None
 
     logger.info(f"[connect] ip={client_ip}")
 
     try:
+
         while True:
+
+            # ---------------------------------------------------------------
+            # Receive message
+            # ---------------------------------------------------------------
+
             raw = await websocket.receive_text()
+
             try:
                 msg = json.loads(raw)
+
             except json.JSONDecodeError:
-                await safe_send(websocket, {"type": "error", "message": "Invalid JSON"})
+
+                await safe_send(
+                    websocket,
+                    {
+                        "type": "error",
+                        "message": "Invalid JSON"
+                    }
+                )
+
                 continue
 
             msg_type = msg.get("type")
 
-            # ------------------------------------------------------------------
-            # 1. Register
-            # ------------------------------------------------------------------
+
+            # ---------------------------------------------------------------
+            # 1. REGISTER
+            # ---------------------------------------------------------------
+
             if msg_type == "register":
-                new_id = msg.get("id", "").strip()
+
+                new_id = normalize_peer_id(
+                    msg.get("id", "")
+                )
+
                 if not new_id or len(new_id) > 32:
-                    await safe_send(websocket, {"type": "error", "message": "Invalid ID"})
+
+                    await safe_send(
+                        websocket,
+                        {
+                            "type": "error",
+                            "message": "Invalid ID"
+                        }
+                    )
+
                     continue
 
-                # If peer was already registered under a different ID, clean up old entry
+
+                # If this WebSocket was already registered
+                # under another ID, remove the old entry.
+
                 if peer_id and peer_id in online_users:
                     del online_users[peer_id]
 
-                peer_id = new_id
-                online_users[peer_id] = websocket
-                logger.info(f"[register] id={peer_id} ip={client_ip} online={len(online_users)}")
-                await safe_send(websocket, {"type": "registered", "id": peer_id})
 
-            # ------------------------------------------------------------------
-            # 2. Connect request (B -> server -> A)
-            # ------------------------------------------------------------------
+                peer_id = new_id
+
+                online_users[peer_id] = websocket
+
+                logger.info(
+                    f"[register] "
+                    f"id={peer_id} "
+                    f"ip={client_ip} "
+                    f"online={len(online_users)}"
+                )
+
+
+                # Tell client registration succeeded
+
+                await safe_send(
+                    websocket,
+                    {
+                        "type": "registered",
+                        "id": peer_id
+                    }
+                )
+
+
+            # ---------------------------------------------------------------
+            # 2. CONNECT REQUEST
+            #
+            # B -> Server -> A
+            # ---------------------------------------------------------------
+
             elif msg_type == "connect_request":
+
+                # Rate limit
+
                 if is_rate_limited(client_ip):
+
                     await safe_send(
                         websocket,
-                        {"type": "error", "message": "Rate limit exceeded - too many connection requests"},
+                        {
+                            "type": "error",
+                            "message": (
+                                "Rate limit exceeded - "
+                                "too many connection requests"
+                            )
+                        }
                     )
+
                     continue
 
-                from_id = msg.get("from", "")
-                to_id = msg.get("to", "")
+
+                # Normalize both IDs
+
+                from_id = normalize_peer_id(
+                    msg.get("from", "")
+                )
+
+                to_id = normalize_peer_id(
+                    msg.get("to", "")
+                )
+
+
+                # Check target peer
 
                 if to_id not in online_users:
-                    await safe_send(websocket, {"type": "error", "message": "peer not available"})
+
+                    await safe_send(
+                        websocket,
+                        {
+                            "type": "error",
+                            "message": "peer not available"
+                        }
+                    )
+
                     continue
 
+
                 target_ws = online_users[to_id]
-                forwarded = dict(msg)  # relay as-is
-                ok = await safe_send(target_ws, forwarded)
+
+
+                # -----------------------------------------------------------
+                # Forward request
+                # -----------------------------------------------------------
+
+                forwarded = dict(msg)
+
+                # IMPORTANT:
+                # Forward normalized IDs instead of the original IDs.
+
+                forwarded["from"] = from_id
+                forwarded["to"] = to_id
+
+
+                ok = await safe_send(
+                    target_ws,
+                    forwarded
+                )
+
+
+                # Target disconnected between lookup and send
+
                 if not ok:
-                    # Target disconnected between lookup and send
-                    online_users.pop(to_id, None)
-                    await safe_send(websocket, {"type": "error", "message": "peer not available"})
-                logger.info(f"[connect_request] from={from_id} to={to_id}")
 
-            # ------------------------------------------------------------------
-            # 3. Connect response (A -> server -> B)
-            # ------------------------------------------------------------------
+                    online_users.pop(
+                        to_id,
+                        None
+                    )
+
+                    await safe_send(
+                        websocket,
+                        {
+                            "type": "error",
+                            "message": "peer not available"
+                        }
+                    )
+
+
+                logger.info(
+                    f"[connect_request] "
+                    f"from={from_id} "
+                    f"to={to_id}"
+                )
+
+
+            # ---------------------------------------------------------------
+            # 3. CONNECT RESPONSE
+            #
+            # A -> Server -> B
+            # ---------------------------------------------------------------
+
             elif msg_type == "connect_response":
-                to_id = msg.get("to", "")
+
+                to_id = normalize_peer_id(
+                    msg.get("to", "")
+                )
+
+
                 if to_id not in online_users:
-                    await safe_send(websocket, {"type": "error", "message": "peer not available"})
+
+                    await safe_send(
+                        websocket,
+                        {
+                            "type": "error",
+                            "message": "peer not available"
+                        }
+                    )
+
                     continue
 
-                target_ws = online_users[to_id]
-                await safe_send(target_ws, dict(msg))
 
-            # ------------------------------------------------------------------
-            # 4. Handshake confirmation (caller -> server -> callee)
-            #    Distinct from connect_response so the client can route it to
-            #    its own verifier instead of mis-parsing it as accept/reject.
-            # ------------------------------------------------------------------
+                target_ws = online_users[to_id]
+
+
+                forwarded = dict(msg)
+
+                forwarded["to"] = to_id
+
+
+                await safe_send(
+                    target_ws,
+                    forwarded
+                )
+
+
+                logger.info(
+                    f"[connect_response] "
+                    f"from={peer_id} "
+                    f"to={to_id}"
+                )
+
+
+            # ---------------------------------------------------------------
+            # 4. HANDSHAKE CONFIRMATION
+            #
+            # Caller -> Server -> Callee
+            # ---------------------------------------------------------------
+
             elif msg_type == "handshake_confirm":
-                to_id = msg.get("to", "")
-                if to_id not in online_users:
-                    await safe_send(websocket, {"type": "error", "message": "peer not available"})
-                    continue
-                target_ws = online_users[to_id]
-                await safe_send(target_ws, dict(msg))
 
-            # ------------------------------------------------------------------
-            # 5. SDP / ICE relay -- pure lookup-and-forward, payload untouched
-            # ------------------------------------------------------------------
-            elif msg_type in ("sdp_offer", "sdp_answer", "ice_candidate"):
-                to_id = msg.get("to", "")
+                to_id = normalize_peer_id(
+                    msg.get("to", "")
+                )
+
+
                 if to_id not in online_users:
-                    # Peer may have disconnected mid-negotiation; silently drop
+
+                    await safe_send(
+                        websocket,
+                        {
+                            "type": "error",
+                            "message": "peer not available"
+                        }
+                    )
+
                     continue
 
+
                 target_ws = online_users[to_id]
-                await safe_send(target_ws, dict(msg))
+
+
+                forwarded = dict(msg)
+
+                forwarded["to"] = to_id
+
+
+                await safe_send(
+                    target_ws,
+                    forwarded
+                )
+
+
+                logger.info(
+                    f"[handshake_confirm] "
+                    f"from={peer_id} "
+                    f"to={to_id}"
+                )
+
+
+            # ---------------------------------------------------------------
+            # 5. SDP / ICE RELAY
+            #
+            # Pure lookup-and-forward.
+            # Payload itself is not modified.
+            # ---------------------------------------------------------------
+
+            elif msg_type in (
+                "sdp_offer",
+                "sdp_answer",
+                "ice_candidate"
+            ):
+
+                to_id = normalize_peer_id(
+                    msg.get("to", "")
+                )
+
+
+                if to_id not in online_users:
+
+                    # Peer may have disconnected
+                    # during negotiation.
+
+                    continue
+
+
+                target_ws = online_users[to_id]
+
+
+                forwarded = dict(msg)
+
+                forwarded["to"] = to_id
+
+
+                await safe_send(
+                    target_ws,
+                    forwarded
+                )
+
+
+                logger.info(
+                    f"[{msg_type}] "
+                    f"from={peer_id} "
+                    f"to={to_id}"
+                )
+
+
+            # ---------------------------------------------------------------
+            # UNKNOWN MESSAGE TYPE
+            # ---------------------------------------------------------------
 
             else:
-                await safe_send(websocket, {"type": "error", "message": f"Unknown message type: {msg_type}"})
+
+                await safe_send(
+                    websocket,
+                    {
+                        "type": "error",
+                        "message": (
+                            f"Unknown message type: {msg_type}"
+                        )
+                    }
+                )
+
+
+    # -----------------------------------------------------------------------
+    # WebSocket disconnected
+    # -----------------------------------------------------------------------
 
     except WebSocketDisconnect:
+
         pass
+
+
     except Exception as e:
-        logger.warning(f"[error] peer={peer_id} ip={client_ip} err={e}")
+
+        logger.warning(
+            f"[error] "
+            f"peer={peer_id} "
+            f"ip={client_ip} "
+            f"err={e}"
+        )
+
+
+    # -----------------------------------------------------------------------
+    # Cleanup
+    # -----------------------------------------------------------------------
+
     finally:
-        # Always remove from online_users on any disconnect/error
-        if peer_id and online_users.get(peer_id) is websocket:
+
+        if (
+            peer_id
+            and online_users.get(peer_id) is websocket
+        ):
+
             del online_users[peer_id]
-            logger.info(f"[disconnect] id={peer_id} online={len(online_users)}")
+
+            logger.info(
+                f"[disconnect] "
+                f"id={peer_id} "
+                f"online={len(online_users)}"
+            )
