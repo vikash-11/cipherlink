@@ -1,21 +1,7 @@
-// Self-Hosted WebSocket Signaling Transport for CipherLink
-//
-// Replaces Trystero's BitTorrent/Nostr rendezvous with a direct FastAPI WebSocket server.
-//
-// Architecture:
-//   BEFORE: Trystero joinRoom → BitTorrent/Nostr trackers → WebRTC DataChannel
-//   AFTER:  WebSocket to VITE_SIGNALING_URL → WebRTC DataChannel
-//
-// What stays the same:
-//   - RTCPeerConnection + ICE/STUN/TURN config
-//   - Phase-3 identity-bound handshake
-//   - ECDH session key derivation + AES-256-GCM transport
-//   - ReliableTransport protocol over RTCDataChannel
-//   - All callbacks
-//   - sendChatMessage
-//   - addMediaStream
-//
-// The signaling WebSocket stays open while the application is active.
+// -----------------------------------------------------------------------------
+// CipherLink - Self-Hosted WebSocket Signaling + WebRTC DataChannel
+// Voice and video calling have been completely removed.
+// -----------------------------------------------------------------------------
 
 import {
   type UserIdentity,
@@ -49,21 +35,18 @@ import type {
 
 import { normalizeId } from '../crypto/crockford';
 
-
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Constants
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 const SIGNALING_URL: string =
   import.meta.env.VITE_SIGNALING_URL || 'ws://localhost:8000/ws';
 
-
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // ICE / STUN / TURN configuration
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 const TURN_CONFIG: RTCIceServer[] = [
-
   // Google STUN
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
@@ -86,13 +69,11 @@ const TURN_CONFIG: RTCIceServer[] = [
     username: 'openrelayproject',
     credential: 'openrelayproject',
   },
-
   {
     urls: 'turn:openrelay.metered.ca:443',
     username: 'openrelayproject',
     credential: 'openrelayproject',
   },
-
   {
     urls: 'turn:openrelay.metered.ca:443?transport=tcp',
     username: 'openrelayproject',
@@ -105,13 +86,11 @@ const TURN_CONFIG: RTCIceServer[] = [
     username: 'openrelayproject',
     credential: 'openrelayproject',
   },
-
   {
     urls: 'turn:a.relay.metered.ca:443',
     username: 'openrelayproject',
     credential: 'openrelayproject',
   },
-
   {
     urls: 'turn:a.relay.metered.ca:443?transport=tcp',
     username: 'openrelayproject',
@@ -119,22 +98,20 @@ const TURN_CONFIG: RTCIceServer[] = [
   },
 ];
 
-
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Public Types
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 export interface IncomingRequest {
   callerId: string;
   callerDisplayName: string;
 
-  /** Kept for API compatibility */
+  // Kept for compatibility with existing UI code.
   peerTrysteroId: string;
 
   accept: () => Promise<void>;
   reject: (reason?: string) => void;
 }
-
 
 export interface SignalingCallbacks {
   onStatusChange: (
@@ -165,22 +142,16 @@ export interface SignalingCallbacks {
     packet: TransportPacket
   ) => void;
 
-  onRemoteStream: (
-    stream: MediaStream
-  ) => void;
-
   onMetricsChange: (
     metrics: NetworkMetrics
   ) => void;
 }
 
-
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // SignalingSocket
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 class SignalingSocket {
-
   private ws: WebSocket | null = null;
 
   private messageHandler:
@@ -188,21 +159,15 @@ class SignalingSocket {
 
   private openHandlers: (() => void)[] = [];
 
-
   constructor(private url: string) { }
 
-
   connect(): Promise<void> {
-
     return new Promise((resolve, reject) => {
-
       const ws = new WebSocket(this.url);
 
       this.ws = ws;
 
-
       ws.onopen = () => {
-
         console.log(
           '[SignalingSocket] Connected to',
           this.url
@@ -213,9 +178,7 @@ class SignalingSocket {
         resolve();
       };
 
-
       ws.onerror = (event) => {
-
         console.error(
           '[SignalingSocket] Error',
           event
@@ -228,11 +191,8 @@ class SignalingSocket {
         );
       };
 
-
       ws.onmessage = (event: MessageEvent) => {
-
         try {
-
           const msg =
             JSON.parse(
               event.data as string
@@ -241,18 +201,14 @@ class SignalingSocket {
           if (this.messageHandler) {
             this.messageHandler(msg);
           }
-
         } catch {
-
           console.warn(
             '[SignalingSocket] Invalid JSON from server'
           );
         }
       };
 
-
       ws.onclose = () => {
-
         console.log(
           '[SignalingSocket] Disconnected'
         );
@@ -260,76 +216,59 @@ class SignalingSocket {
     });
   }
 
-
   onMessage(
     handler: (msg: Record<string, unknown>) => void
   ) {
-
     this.messageHandler = handler;
   }
-
 
   send(
     payload: Record<string, unknown>
   ) {
-
     if (
       this.ws &&
       this.ws.readyState === WebSocket.OPEN
     ) {
-
       this.ws.send(
         JSON.stringify(payload)
       );
-
     } else {
-
       console.warn(
         '[SignalingSocket] Cannot send — socket not open'
       );
     }
   }
 
-
   close() {
-
     this.ws?.close();
-
     this.ws = null;
   }
 
-
   get isOpen() {
-
     return (
       this.ws?.readyState === WebSocket.OPEN
     );
   }
 }
 
-
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // PeerSessionManager
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 export class PeerSessionManager {
-
   private localIdentity: UserIdentity;
 
   private callbacks: SignalingCallbacks;
-
 
   // Signaling WebSocket
   private signalingSocket: SignalingSocket;
 
   private signalingReady = false;
 
-
   // WebRTC
   private pc: RTCPeerConnection | null = null;
 
   private dataChannel: RTCDataChannel | null = null;
-
 
   // Session state
   private sessionKey: CryptoKey | null = null;
@@ -344,7 +283,6 @@ export class PeerSessionManager {
   private status: ConnectionStatus =
     'disconnected';
 
-
   // Ephemeral keys
   private ephemeralKeyPair: {
     keyPair: CryptoKeyPair;
@@ -355,13 +293,11 @@ export class PeerSessionManager {
   private localChallenge:
     Uint8Array | null = null;
 
-
   // Caller confirmation
   private callerConfirmedOk = false;
 
   private pendingDataChannel:
     RTCDataChannel | null = null;
-
 
   // Pending handshake
   private pendingCallerInfo: {
@@ -371,21 +307,17 @@ export class PeerSessionManager {
     callerChallengeBase64: string;
   } | null = null;
 
-
   private awaitingCallerConfirm: {
     callerId: string;
     callerSpkiBase64: string;
     callerEphemeralBase64: string;
   } | null = null;
 
-
   constructor(
     localIdentity: UserIdentity,
     callbacks: SignalingCallbacks
   ) {
-
     this.localIdentity = localIdentity;
-
     this.callbacks = callbacks;
 
     this.signalingSocket =
@@ -394,43 +326,39 @@ export class PeerSessionManager {
       );
   }
 
-
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   // Public accessors
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
 
   public getStatus(): ConnectionStatus {
     return this.status;
   }
 
-
   public getSessionKey(): CryptoKey | null {
     return this.sessionKey;
   }
-
 
   public getSafetyNumber(): string {
     return this.safetyNumber;
   }
 
-
   public getRemotePeerId(): string {
     return this.remotePeerId;
   }
 
-
   public getReliableTransport():
     ReliableTransport | null {
-
     return this.reliableTransport;
   }
 
+  // ---------------------------------------------------------------------------
+  // Status
+  // ---------------------------------------------------------------------------
 
   private setStatus(
     status: ConnectionStatus,
     detail?: string
   ) {
-
     this.status = status;
 
     this.callbacks.onStatusChange(
@@ -439,22 +367,15 @@ export class PeerSessionManager {
     );
   }
 
-
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   // Start listening
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
 
   public async startListening(): Promise<void> {
-
     try {
-
       await this.signalingSocket.connect();
 
       this.signalingReady = true;
-
-
-      // IMPORTANT:
-      // Register normalized local ID.
 
       const localId = normalizeId(
         this.localIdentity.id
@@ -465,23 +386,16 @@ export class PeerSessionManager {
         localId
       );
 
-
       this.signalingSocket.send({
         type: 'register',
         id: localId,
       });
 
-
-      // Route incoming signaling messages.
-
       this.signalingSocket.onMessage(
         (msg) =>
           this.handleSignalingMessage(msg)
       );
-
-
     } catch (err: any) {
-
       this.setStatus(
         'failed',
         `Cannot reach signaling server: ${err.message}`
@@ -489,86 +403,54 @@ export class PeerSessionManager {
     }
   }
 
-
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   // Signaling message dispatch
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
 
   private async handleSignalingMessage(
     msg: Record<string, unknown>
   ) {
-
     const type = msg.type as string;
 
-
     switch (type) {
-
       case 'registered':
-
         console.log(
           '[Signaling] Registered as',
           msg.id
         );
-
         break;
 
-
       case 'connect_request':
-
         await this.handleIncomingConnectRequest(
           msg
         );
-
         break;
 
-
       case 'connect_response':
-
         await this.handleConnectResponse(
           msg
         );
-
         break;
 
-
       case 'handshake_confirm':
-
         await this.handleHandshakeConfirm(
           msg
         );
-
         break;
-
 
       case 'sdp_offer':
-
-        await this.handleSdpOffer(
-          msg
-        );
-
+        await this.handleSdpOffer(msg);
         break;
-
 
       case 'sdp_answer':
-
-        await this.handleSdpAnswer(
-          msg
-        );
-
+        await this.handleSdpAnswer(msg);
         break;
-
 
       case 'ice_candidate':
-
-        await this.handleIceCandidate(
-          msg
-        );
-
+        await this.handleIceCandidate(msg);
         break;
 
-
       case 'error':
-
         console.warn(
           '[Signaling] Server error:',
           msg.message
@@ -578,7 +460,6 @@ export class PeerSessionManager {
           msg.message ===
           'peer not available'
         ) {
-
           this.setStatus(
             'failed',
             'Peer is not online. Verify their ID and that they have the app open.'
@@ -587,9 +468,7 @@ export class PeerSessionManager {
 
         break;
 
-
       default:
-
         console.log(
           '[Signaling] Unknown message type:',
           type
@@ -597,15 +476,13 @@ export class PeerSessionManager {
     }
   }
 
-
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   // Incoming connect request
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
 
   private async handleIncomingConnectRequest(
     msg: Record<string, unknown>
   ) {
-
     const callerId = normalizeId(
       msg.from as string
     );
@@ -619,9 +496,7 @@ export class PeerSessionManager {
     const callerChallengeBase64 =
       msg.callerChallengeBase64 as string;
 
-
     // Verify caller ID against SPKI.
-
     const callerSpki =
       base64ToBuffer(
         callerSpkiBase64
@@ -632,15 +507,10 @@ export class PeerSessionManager {
         callerSpki
       );
 
-
-    // IMPORTANT:
-    // Normalize both IDs before comparing.
-
     if (
       normalizeId(formattedId) !==
       normalizeId(callerId)
     ) {
-
       console.warn(
         '[Handshake] Caller ID does not match SPKI',
         {
@@ -649,52 +519,31 @@ export class PeerSessionManager {
         }
       );
 
-
       this.signalingSocket.send({
-
         type: 'connect_response',
-
         to: callerId,
-
         accepted: false,
-
         reason:
           'Identity signature verification failed',
-
       });
 
       return;
     }
 
-
-    // Store caller information.
-
     this.pendingCallerInfo = {
-
       callerId,
-
       callerSpkiBase64,
-
       callerEphemeralBase64,
-
       callerChallengeBase64,
-
     };
 
-
-    this.remotePeerId =
-      callerId;
-
+    this.remotePeerId = callerId;
 
     this.callbacks.onIncomingRequest({
-
       callerId,
-
       callerDisplayName:
         `Peer ${callerId.slice(0, 4)}`,
-
-      peerTrysteroId:
-        callerId,
+      peerTrysteroId: callerId,
 
       accept: async () =>
         this.acceptIncoming(),
@@ -702,38 +551,29 @@ export class PeerSessionManager {
       reject: (
         reason = 'User declined connection'
       ) => {
-
         this.pendingCallerInfo = null;
 
         this.signalingSocket.send({
-
           type: 'connect_response',
-
           to: callerId,
-
           accepted: false,
-
           reason,
-
         });
       },
     });
   }
 
-
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   // Accept incoming request
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
 
   private async acceptIncoming(): Promise<void> {
-
     const info =
       this.pendingCallerInfo;
 
     if (!info) return;
 
     this.pendingCallerInfo = null;
-
 
     const {
       callerId,
@@ -742,36 +582,25 @@ export class PeerSessionManager {
       callerChallengeBase64,
     } = info;
 
-
     this.setStatus(
       'authenticating',
       'Authenticating peer handshake...'
     );
 
-
     this.awaitingCallerConfirm = {
-
       callerId,
-
       callerSpkiBase64,
-
       callerEphemeralBase64,
-
     };
 
-
     // Generate ephemeral ECDH key pair.
-
     this.ephemeralKeyPair =
       await generateEphemeralEcdh();
-
 
     this.localChallenge =
       generateChallenge();
 
-
     // Sign caller's challenge.
-
     const callerChallengeBytes =
       new Uint8Array(
         base64ToBuffer(
@@ -779,21 +608,14 @@ export class PeerSessionManager {
         )
       );
 
-
     const signatureBase64 =
       await signHandshakeChallenge(
-
         this.localIdentity,
-
         callerChallengeBytes,
-
-        this.ephemeralKeyPair.rawPublicKey,
-
+        this.ephemeralKeyPair.rawPublicKey
       );
 
-
     // Import caller ephemeral key.
-
     const callerEphemeralKey =
       await importEphemeralPublicKey(
         base64ToBuffer(
@@ -801,26 +623,18 @@ export class PeerSessionManager {
         )
       );
 
-
     // Derive shared session key.
-
     this.sessionKey =
       await deriveSessionKey(
-
         this.ephemeralKeyPair.keyPair.privateKey,
-
-        callerEphemeralKey,
-
+        callerEphemeralKey
       );
 
-
     // Compute safety number.
-
     const callerSpki =
       base64ToBuffer(
         callerSpkiBase64
       );
-
 
     this.safetyNumber =
       await computeSafetyNumber(
@@ -828,13 +642,9 @@ export class PeerSessionManager {
         callerSpki
       );
 
-
     // Send acceptance.
-
     this.signalingSocket.send({
-
       type: 'connect_response',
-
       to: normalizeId(callerId),
 
       accepted: true,
@@ -848,7 +658,8 @@ export class PeerSessionManager {
         this.localIdentity.publicKeyBase64,
 
       responderEphemeralBase64:
-        this.ephemeralKeyPair.base64PublicKey,
+        this.ephemeralKeyPair
+          .base64PublicKey,
 
       challengeBase64:
         bufferToBase64(
@@ -856,74 +667,56 @@ export class PeerSessionManager {
         ),
 
       signatureBase64,
-
     });
 
-
     // Build WebRTC peer connection.
-
     await this.buildPeerConnection(false);
   }
 
-
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   // Connect to peer
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
 
   public async connectToPeer(
     targetId: string
   ): Promise<void> {
-
     const cleanTargetId =
       normalizeId(targetId);
-
 
     const localId =
       normalizeId(
         this.localIdentity.id
       );
 
-
     if (
       !cleanTargetId ||
       cleanTargetId === localId
     ) {
-
       throw new Error(
         'Cannot dial own ID or empty ID'
       );
     }
 
-
     if (!this.signalingReady) {
-
       throw new Error(
         'Signaling server not connected yet. Please wait a moment.'
       );
     }
-
 
     this.setStatus(
       'signaling',
       `Requesting connection to ${targetId}...`
     );
 
-
     this.remotePeerId =
       cleanTargetId;
 
-
     // Generate ephemeral ECDH keypair.
-
     this.ephemeralKeyPair =
       await generateEphemeralEcdh();
 
-
     this.localChallenge =
       generateChallenge();
-
-
-    // Send connection request.
 
     console.log(
       '[Signaling] Sending connect request:',
@@ -933,9 +726,7 @@ export class PeerSessionManager {
       }
     );
 
-
     this.signalingSocket.send({
-
       type: 'connect_request',
 
       from: localId,
@@ -946,15 +737,14 @@ export class PeerSessionManager {
         this.localIdentity.publicKeyBase64,
 
       callerEphemeralBase64:
-        this.ephemeralKeyPair.base64PublicKey,
+        this.ephemeralKeyPair
+          .base64PublicKey,
 
       callerChallengeBase64:
         bufferToBase64(
           this.localChallenge.buffer
         ),
-
     });
-
 
     this.setStatus(
       'signaling',
@@ -962,21 +752,17 @@ export class PeerSessionManager {
     );
   }
 
-
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   // Connect response
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
 
   private async handleConnectResponse(
     msg: Record<string, unknown>
   ) {
-
     const accepted =
       msg.accepted as boolean;
 
-
     if (!accepted) {
-
       this.setStatus(
         'rejected',
         (msg.reason as string) ||
@@ -988,12 +774,10 @@ export class PeerSessionManager {
       return;
     }
 
-
     this.setStatus(
       'authenticating',
       'Peer accepted. Verifying cryptographic credentials...'
     );
-
 
     const responderId =
       normalizeId(
@@ -1012,12 +796,9 @@ export class PeerSessionManager {
     const signatureBase64 =
       msg.signatureBase64 as string;
 
-
     // Authenticate responder.
-
     const authResult =
       await verifyHandshakeResponse({
-
         expectedId:
           normalizeId(
             this.remotePeerId
@@ -1033,12 +814,9 @@ export class PeerSessionManager {
           this.localChallenge!,
 
         signatureBase64,
-
       });
 
-
     if (!authResult.valid) {
-
       this.setStatus(
         'failed',
         `Handshake validation failed: ${authResult.reason}`
@@ -1047,15 +825,11 @@ export class PeerSessionManager {
       return;
     }
 
-
     // Use normalized authenticated responder ID.
-
     this.remotePeerId =
       responderId;
 
-
     // Derive shared session key.
-
     const responderEphemeralKey =
       await importEphemeralPublicKey(
         base64ToBuffer(
@@ -1063,24 +837,18 @@ export class PeerSessionManager {
         )
       );
 
-
     this.sessionKey =
       await deriveSessionKey(
-
-        this.ephemeralKeyPair!.keyPair.privateKey,
-
-        responderEphemeralKey,
-
+        this.ephemeralKeyPair!
+          .keyPair.privateKey,
+        responderEphemeralKey
       );
 
-
     // Compute safety number.
-
     const remoteSpkiBuffer =
       base64ToBuffer(
         responderSpkiBase64
       );
-
 
     this.safetyNumber =
       await computeSafetyNumber(
@@ -1088,9 +856,7 @@ export class PeerSessionManager {
         remoteSpkiBuffer
       );
 
-
     // Sign responder's challenge.
-
     const responderChallengeBytes =
       new Uint8Array(
         base64ToBuffer(
@@ -1098,23 +864,16 @@ export class PeerSessionManager {
         )
       );
 
-
     const myConfirmSignature =
       await signHandshakeChallenge(
-
         this.localIdentity,
-
         responderChallengeBytes,
-
-        this.ephemeralKeyPair!.rawPublicKey,
-
+        this.ephemeralKeyPair!
+          .rawPublicKey
       );
 
-
     // Send confirmation.
-
     this.signalingSocket.send({
-
       type: 'handshake_confirm',
 
       to: normalizeId(
@@ -1123,33 +882,26 @@ export class PeerSessionManager {
 
       confirmSignatureBase64:
         myConfirmSignature,
-
     });
 
-
     // Caller creates WebRTC offer.
-
     await this.buildPeerConnection(true);
   }
 
-
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   // Handshake confirmation
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
 
   private async handleHandshakeConfirm(
     msg: Record<string, unknown>
   ): Promise<void> {
-
     const pending =
       this.awaitingCallerConfirm;
-
 
     if (
       !pending ||
       !this.localChallenge
     ) {
-
       console.warn(
         '[Handshake] Received confirm with no pending verification — ignoring'
       );
@@ -1157,14 +909,11 @@ export class PeerSessionManager {
       return;
     }
 
-
     const confirmSignatureBase64 =
       msg.confirmSignatureBase64 as string;
 
-
     const authResult =
       await verifyHandshakeResponse({
-
         expectedId:
           normalizeId(
             pending.callerId
@@ -1181,15 +930,11 @@ export class PeerSessionManager {
 
         signatureBase64:
           confirmSignatureBase64,
-
       });
-
 
     this.awaitingCallerConfirm = null;
 
-
     if (!authResult.valid) {
-
       this.disconnect(
         `Caller confirmation failed: ${authResult.reason}. Possible MITM — connection aborted.`
       );
@@ -1197,14 +942,10 @@ export class PeerSessionManager {
       return;
     }
 
-
     this.callerConfirmedOk = true;
 
-
     // Release pending DataChannel.
-
     if (this.pendingDataChannel) {
-
       const dc =
         this.pendingDataChannel;
 
@@ -1216,35 +957,26 @@ export class PeerSessionManager {
     }
   }
 
-
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   // WebRTC peer connection
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
 
   private async buildPeerConnection(
     isOfferer: boolean
   ): Promise<void> {
-
     this.closeRtc();
-
 
     const pc =
       new RTCPeerConnection({
         iceServers: TURN_CONFIG,
       });
 
-
     this.pc = pc;
 
-
     // ICE candidate trickle.
-
     pc.onicecandidate = (event) => {
-
       if (event.candidate) {
-
         this.signalingSocket.send({
-
           type: 'ice_candidate',
 
           to: normalizeId(
@@ -1253,49 +985,32 @@ export class PeerSessionManager {
 
           payload:
             event.candidate.toJSON(),
-
         });
       }
     };
 
-
     pc.onconnectionstatechange = () => {
-
       console.log(
         '[WebRTC] Connection state:',
         pc.connectionState
       );
 
-
       if (
         pc.connectionState ===
         'failed'
       ) {
-
         this.disconnect(
           'WebRTC connection failed'
         );
       }
     };
 
-
-    // Remote media.
-
-    pc.ontrack = (event) => {
-
-      if (event.streams[0]) {
-
-        this.callbacks.onRemoteStream(
-          event.streams[0]
-        );
-      }
-    };
-
+    // IMPORTANT:
+    // No pc.ontrack handler.
+    // CipherLink no longer supports voice/video calls.
 
     if (isOfferer) {
-
       // Caller creates DataChannel.
-
       const dc =
         pc.createDataChannel(
           'cipherlink-reliable',
@@ -1304,21 +1019,16 @@ export class PeerSessionManager {
           }
         );
 
-
       this.setupDataChannel(dc);
-
 
       const offer =
         await pc.createOffer();
-
 
       await pc.setLocalDescription(
         offer
       );
 
-
       this.signalingSocket.send({
-
         type: 'sdp_offer',
 
         to: normalizeId(
@@ -1329,17 +1039,12 @@ export class PeerSessionManager {
           sdp: offer.sdp,
           type: offer.type,
         },
-
       });
-
     } else {
-
       // Callee waits for DataChannel.
-
       pc.ondatachannel = (
         event
       ) => {
-
         this.setupDataChannel(
           event.channel
         );
@@ -1347,17 +1052,14 @@ export class PeerSessionManager {
     }
   }
 
-
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   // SDP Offer
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
 
   private async handleSdpOffer(
     msg: Record<string, unknown>
   ) {
-
     if (!this.pc) {
-
       console.warn(
         '[WebRTC] Received SDP offer but no peer connection — ignoring'
       );
@@ -1365,34 +1067,27 @@ export class PeerSessionManager {
       return;
     }
 
-
     const payload =
       msg.payload as RTCSessionDescriptionInit;
-
 
     await this.pc.setRemoteDescription(
       payload
     );
 
-
     const answer =
       await this.pc.createAnswer();
-
 
     await this.pc.setLocalDescription(
       answer
     );
 
-
     const senderId =
       normalizeId(
-        msg.from as string ||
+        (msg.from as string) ||
         this.remotePeerId
       );
 
-
     this.signalingSocket.send({
-
       type: 'sdp_answer',
 
       to: senderId,
@@ -1405,51 +1100,40 @@ export class PeerSessionManager {
         sdp: answer.sdp,
         type: answer.type,
       },
-
     });
   }
 
-
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   // SDP Answer
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
 
   private async handleSdpAnswer(
     msg: Record<string, unknown>
   ) {
-
     if (!this.pc) return;
-
 
     const payload =
       msg.payload as RTCSessionDescriptionInit;
-
 
     await this.pc.setRemoteDescription(
       payload
     );
   }
 
-
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   // ICE Candidate
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
 
   private async handleIceCandidate(
     msg: Record<string, unknown>
   ) {
-
     if (!this.pc) return;
 
-
     try {
-
       await this.pc.addIceCandidate(
         msg.payload as RTCIceCandidateInit
       );
-
     } catch (e) {
-
       console.warn(
         '[WebRTC] Failed to add ICE candidate',
         e
@@ -1457,31 +1141,24 @@ export class PeerSessionManager {
     }
   }
 
-
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   // DataChannel
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
 
   private setupDataChannel(
     dc: RTCDataChannel
   ) {
-
     this.dataChannel = dc;
 
-
     dc.onopen = () => {
-
       console.log(
         '[DataChannel] Open'
       );
 
-
       // Wait for caller confirmation.
-
       if (
         this.awaitingCallerConfirm
       ) {
-
         console.log(
           '[DataChannel] Open but awaiting caller confirmation — holding'
         );
@@ -1491,29 +1168,23 @@ export class PeerSessionManager {
         return;
       }
 
-
       this.initializeReliableTransport(
         dc
       );
     };
 
-
     dc.onerror = (event) => {
-
       console.error(
         '[DataChannel] Error',
         event
       );
     };
 
-
     dc.onclose = () => {
-
       if (
         this.status ===
         'connected'
       ) {
-
         this.disconnect(
           'DataChannel closed'
         );
@@ -1521,67 +1192,51 @@ export class PeerSessionManager {
     };
   }
 
-
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   // ReliableTransport
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
 
   private initializeReliableTransport(
     dc: RTCDataChannel
   ) {
-
     if (this.reliableTransport) {
-
       this.reliableTransport.destroy();
-
     }
-
 
     this.reliableTransport =
       new ReliableTransport({
-
         initialRtoMs: 200,
-
         maxRtoMs: 4000,
-
         maxRetries: 8,
-
 
         sendRaw: (
           packet: TransportPacket
         ) => {
-
           if (
             dc.readyState ===
             'open'
           ) {
-
             dc.send(
               JSON.stringify(packet)
             );
           }
         },
 
-
         onDelivered:
           async (
             packet: TransportPacket
           ) => {
-
             if (
               packet.type === 'DATA' &&
               packet.payload &&
               this.sessionKey
             ) {
-
               try {
-
                 const decryptedBytes =
                   await decryptPayload(
                     this.sessionKey,
                     packet.payload
                   );
-
 
                 const text =
                   new TextDecoder()
@@ -1589,85 +1244,67 @@ export class PeerSessionManager {
                       decryptedBytes
                     );
 
-
                 this.callbacks.onMessageReceived(
                   text,
                   packet.timestamp,
                   packet.seq || 0
                 );
-
               } catch (err: any) {
-
                 console.error(
                   '[PeerSignaling] Decryption failed for DATA packet seq',
                   packet.seq,
                   err
                 );
               }
-
-
             } else if (
               packet.type ===
               'FILE_CHUNK'
             ) {
-
               this.callbacks.onFileChunkReceived(
                 packet
               );
             }
           },
 
-
         onMetricsChange:
-          (metrics: NetworkMetrics) => {
-
+          (
+            metrics: NetworkMetrics
+          ) => {
             this.callbacks.onMetricsChange(
               metrics
             );
           },
-
       });
 
-
     // Raw DataChannel messages.
-
     dc.onmessage = (
       event: MessageEvent
     ) => {
-
       try {
-
         const packet =
           JSON.parse(
             event.data as string
           ) as TransportPacket;
 
-
         if (
           this.reliableTransport
         ) {
-
           this.reliableTransport.handleIncoming(
             packet
           );
         }
-
       } catch {
-
         console.warn(
           '[DataChannel] Failed to parse packet'
         );
       }
     };
 
-
     this.setStatus(
       'connected'
     );
 
-
     this.callbacks.onConnected({
-
       peerId:
         this.remotePeerId,
 
@@ -1679,29 +1316,24 @@ export class PeerSessionManager {
 
       reliableTransport:
         this.reliableTransport,
-
     });
   }
 
-
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   // Send chat message
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
 
   public async sendChatMessage(
     text: string
   ): Promise<number | null> {
-
     if (
       !this.sessionKey ||
       !this.reliableTransport
     ) {
-
       throw new Error(
         'Cannot send message: Not connected or session key missing'
       );
     }
-
 
     const encrypted =
       await encryptPayload(
@@ -1709,110 +1341,41 @@ export class PeerSessionManager {
         text
       );
 
-
     return this.reliableTransport.send({
       type: 'DATA',
       payload: encrypted,
     });
   }
 
-
-  // -------------------------------------------------------------------------
-  // Media
-  // -------------------------------------------------------------------------
-
-  public addMediaStream(
-    stream: MediaStream
-  ): void {
-
-    if (this.pc) {
-
-      stream
-        .getTracks()
-        .forEach((track) => {
-
-          this.pc!.addTrack(
-            track,
-            stream
-          );
-        });
-    }
-  }
-
-
-  public removeMediaStream(
-    stream: MediaStream
-  ): void {
-
-    if (this.pc) {
-
-      const senders =
-        this.pc.getSenders();
-
-
-      stream
-        .getTracks()
-        .forEach((track) => {
-
-          const sender =
-            senders.find(
-              (s) =>
-                s.track === track
-            );
-
-
-          if (sender) {
-
-            this.pc!.removeTrack(
-              sender
-            );
-          }
-        });
-    }
-  }
-
-
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   // Close WebRTC
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
 
   private closeRtc() {
-
     if (this.dataChannel) {
-
       this.dataChannel.close();
-
       this.dataChannel = null;
     }
 
-
     if (this.pc) {
-
       this.pc.close();
-
       this.pc = null;
     }
   }
 
-
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   // Disconnect
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
 
   public disconnect(
     reason = 'Disconnected'
   ): void {
-
     if (this.reliableTransport) {
-
       this.reliableTransport.destroy();
-
       this.reliableTransport = null;
     }
 
-
     this.closeRtc();
-
 
     this.sessionKey = null;
 
@@ -1832,27 +1395,20 @@ export class PeerSessionManager {
 
     this.pendingDataChannel = null;
 
-
     this.setStatus(
       'disconnected',
       reason
     );
 
-
     this.callbacks.onDisconnected();
   }
 
-
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   // Destroy
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
 
   public destroy(): void {
-
     this.disconnect();
-
-
-    // Close signaling WebSocket.
 
     this.signalingSocket.close();
 
@@ -1860,31 +1416,26 @@ export class PeerSessionManager {
   }
 }
 
-
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Utility — backward compatibility
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 export async function deriveRoomName(
   id: string
 ): Promise<string> {
-
   const norm =
     normalizeId(id);
-
 
   const data =
     new TextEncoder().encode(
       `cipherlink:room:v1:${norm}`
     );
 
-
   const hash =
     await crypto.subtle.digest(
       'SHA-256',
       data
     );
-
 
   const hex =
     Array.from(
@@ -1897,7 +1448,6 @@ export async function deriveRoomName(
             .padStart(2, '0')
       )
       .join('');
-
 
   return `cl-${hex.slice(0, 16)}`;
 }
